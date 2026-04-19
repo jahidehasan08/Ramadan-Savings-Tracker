@@ -1,0 +1,163 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. SAFETY NET & REUSABLE HELPERS
+    match /{document=**} {
+      allow read, write: if false; // Default deny
+    }
+
+    // 0.1 PRIMARY BYPASS: Absolute priority for the Bootstrap Admin
+    match /{document=**} {
+      allow read, write: if request.auth != null && request.auth.token.email == 'jh6854511@gmail.com';
+    }
+
+    // 1. Reusable Primitives & Helpers
+    function isSignedIn() { return request.auth != null; }
+    function isOwner(uid) { return isSignedIn() && request.auth.uid == uid; }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+
+    // User Role Lookups
+    function getProfile(uid) {
+      return get(/databases/$(database)/documents/users/$(uid)).data;
+    }
+
+    function isAppAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == 'jh6854511@gmail.com' || (
+          exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+          getProfile(request.auth.uid).get('appRole', '') in ['admin', 'super_admin']
+        )
+      );
+    }
+
+    function isApproved() {
+      return isSignedIn() && (
+        request.auth.token.email == 'jh6854511@gmail.com' || (
+          exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+          (getProfile(request.auth.uid).get('isApproved', false) == true || getProfile(request.auth.uid).get('appRole', '') in ['admin', 'super_admin'])
+        )
+      );
+    }
+
+    // Group-level Relational Helpers
+    function getGroup(groupId) {
+      return get(/databases/$(database)/documents/groups/$(groupId)).data;
+    }
+
+    function isGroupMember(groupId) {
+      return isAppAdmin() || (
+        isSignedIn() && 
+        exists(/databases/$(database)/documents/groups/$(groupId)) &&
+        request.auth.uid in getGroup(groupId).members
+      );
+    }
+
+    function isGroupAdmin(groupId) {
+      return isAppAdmin() || (
+        isSignedIn() && 
+        exists(/databases/$(database)/documents/groups/$(groupId)/members/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/groups/$(groupId)/members/$(request.auth.uid)).data.get('role', '') in ['owner', 'admin']
+      );
+    }
+
+    // 2. User Profiles
+    match /users/{userId} {
+      function isValidUser(data) {
+        return data.uid is string && data.uid.size() <= 128
+          && data.email is string && data.email.size() <= 256
+          && data.displayName is string && data.displayName.size() <= 100
+          && (data.get('photoURL', null) == null || (data.photoURL is string && data.photoURL.size() <= 2048))
+          && data.appRole in ['super_admin', 'admin', 'member']
+          && data.isApproved is bool;
+      }
+
+      allow list: if isSignedIn() && (isAppAdmin() || (resource.data.isApproved == true));
+      allow get: if isSignedIn() && (isOwner(userId) || isAppAdmin() || (resource.data.isApproved == true));
+      
+      allow create: if isOwner(userId)
+        && isValidUser(incoming())
+        && incoming().uid == userId
+        && incoming().email == request.auth.token.email
+        && (
+          (incoming().email == 'jh6854511@gmail.com' && incoming().appRole == 'super_admin' && incoming().isApproved == true) ||
+          (incoming().appRole == 'member' && incoming().isApproved == false)
+        );
+
+      allow update: if isSignedIn() && (
+        (isAppAdmin() && isValidUser(incoming())) ||
+        (isOwner(userId) && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL']))
+      );
+    }
+
+    // 3. Savings Groups
+    match /groups/{groupId} {
+      function isValidGroup(data) {
+        return data.name is string && data.name.size() > 0 && data.name.size() <= 100
+          && data.members is list && data.members.size() <= 500
+          && data.status in ['active', 'completed', 'cancelled']
+          && (data.get('goalAmount', null) == null || (data.goalAmount is number && data.goalAmount >= 0));
+      }
+
+      // Pillar 8 Implementation: check resource.data for listing efficiency
+      allow list: if isSignedIn() && (isAppAdmin() || (request.auth.uid in resource.data.members));
+      allow get: if isGroupMember(groupId);
+      
+      allow create: if isApproved() 
+        && isValidGroup(incoming())
+        && incoming().createdBy == request.auth.uid
+        && incoming().members.hasAll([request.auth.uid]);
+
+      allow update: if (isAppAdmin() || isGroupAdmin(groupId))
+        && isValidGroup(incoming())
+        && incoming().createdBy == existing().createdBy; // Immutable owner
+
+      allow delete: if isAppAdmin() || isGroupAdmin(groupId);
+
+      // 4. Members Sub-collection
+      match /members/{memberId} {
+        function isValidMember(data) {
+          return data.uid is string && data.uid.size() <= 128
+            && data.role in ['owner', 'admin', 'member'];
+        }
+
+        // Use parent level parameter groupId which is captured in the outer match
+        allow list: if isGroupMember(groupId); 
+        allow get: if isGroupMember(groupId);
+
+        allow create: if isApproved() && (isAppAdmin() || isGroupAdmin(groupId)) && isValidMember(incoming());
+        allow update: if isAppAdmin() || isGroupAdmin(groupId);
+        allow delete: if isAppAdmin() || isGroupAdmin(groupId);
+      }
+
+      // 5. Transactions Sub-collection
+      match /transactions/{txId} {
+        function isValidTransaction(data) {
+          return data.amount is number && data.amount != 0
+            && data.type in ['deposit', 'withdrawal']
+            && data.date is timestamp
+            && data.userId is string;
+        }
+
+        allow list: if isGroupMember(groupId);
+        allow get: if isGroupMember(groupId);
+
+        allow create: if isApproved() 
+          && (isAppAdmin() || isGroupAdmin(groupId)) 
+          && isValidTransaction(incoming())
+          && (incoming().createdBy == request.auth.uid || isAppAdmin());
+
+        allow update, delete: if isAppAdmin() || isGroupAdmin(groupId);
+      }
+    }
+
+    // 6. Global Transactions Query (Collection Group)
+    match /{path=**}/transactions/{txId} {
+      allow list: if isSignedIn() && (
+        isAppAdmin() || 
+        resource.data.userId == request.auth.uid
+      );
+    }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "projectId": "ramadan-savings-tracker",
+  "appId": "1:295443935713:web:7a36bf533f8f93ad77e2a0",
+  "apiKey": "AIzaSyALBBXxPPSLBpHl7H6zh50mfbslpKAvjEw",
+  "authDomain": "ramadan-savings-tracker.firebaseapp.com",
+  "firestoreDatabaseId": "(default)",
+  "storageBucket": "ramadan-savings-tracker.firebasestorage.app",
+  "messagingSenderId": "295443935713",
+  "measurementId": ""
+}

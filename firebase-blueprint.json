@@ -1,0 +1,83 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile information",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email"]
+    },
+    "SavingsGroup": {
+      "title": "Savings Group",
+      "description": "A group for saving money for Qurbani",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "goalAmount": { "type": "number" },
+        "targetDate": { "type": "string", "format": "date-time" },
+        "createdBy": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "members": { "type": "array", "items": { "type": "string" } },
+        "status": { "type": "string", "enum": ["active", "completed", "cancelled"] }
+      },
+      "required": ["name", "createdBy", "createdAt", "members", "status"]
+    },
+    "Member": {
+      "title": "Group Member",
+      "description": "Membership details in a specific group",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "displayName": { "type": "string" },
+        "email": { "type": "string" },
+        "role": { "type": "string", "enum": ["owner", "admin", "member"] },
+        "joinedAt": { "type": "string", "format": "date-time" },
+        "targetMonthlyAmount": { "type": "number" }
+      },
+      "required": ["uid", "role", "joinedAt"]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "Deposit or withdrawal transaction",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "amount": { "type": "number" },
+        "type": { "type": "string", "enum": ["deposit", "withdrawal"] },
+        "description": { "type": "string" },
+        "date": { "type": "string", "format": "date-time" },
+        "userId": { "type": "string" },
+        "userName": { "type": "string" },
+        "createdBy": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["amount", "type", "userId", "createdBy", "createdAt", "date"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profile"
+    },
+    "/groups/{groupId}": {
+      "schema": "SavingsGroup",
+      "description": "Savings groups"
+    },
+    "/groups/{groupId}/members/{memberId}": {
+      "schema": "Member",
+      "description": "Members within a group"
+    },
+    "/groups/{groupId}/transactions/{transactionId}": {
+      "schema": "Transaction",
+      "description": "Transactions within a group"
+    }
+  }
+}
