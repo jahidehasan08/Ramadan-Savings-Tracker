@@ -50,7 +50,10 @@ import {
   EyeOff,
   Mail,
   Lock,
-  Key
+  Key,
+  Wifi,
+  WifiOff,
+  RotateCw
 } from 'lucide-react';
 import { auth, db, signInWithGoogle, logOut, createUserWithEmailAndPassword, signInWithEmailAndPassword, updateProfile, updatePassword, deleteUser, reauthenticateWithCredential, EmailAuthProvider, sendPasswordResetEmail } from './lib/firebase';
 import { cn, formatCurrency, formatNumber } from './lib/utils';
@@ -423,6 +426,10 @@ export default function App() {
   const [isProfileUpdating, setIsProfileUpdating] = useState(false);
   const [photoPreview, setPhotoPreview] = useState<string | null>(null);
   
+  // Offline Synchronization States
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [isSyncing, setIsSyncing] = useState(false);
+  
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [globalTransactions, setGlobalTransactions] = useState<Transaction[]>([]);
   const [txQueryFallback, setTxQueryFallback] = useState(false);
@@ -686,6 +693,18 @@ export default function App() {
     };
   }, [lang]);
 
+  // Offline Sync and Network Status
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
   // Listen to groups based on user profile/role
   useEffect(() => {
     if (userProfile && user) {
@@ -696,6 +715,8 @@ export default function App() {
 
       const detachGroups = onSnapshot(groupsQuery, (snapshot) => {
         setGroups(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as SavingsGroup)));
+        if (snapshot.metadata.hasPendingWrites) setIsSyncing(true);
+        else if (!snapshot.metadata.hasPendingWrites) setIsSyncing(false);
       }, (error) => console.error("Groups Snapshot error:", error));
 
       return () => detachGroups();
@@ -847,11 +868,13 @@ export default function App() {
       );
       const detachTx = onSnapshot(txQ, (snapshot) => {
         setTransactions(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Transaction)));
+        setIsSyncing(snapshot.metadata.hasPendingWrites);
       }, (error) => console.error("Group Transactions Snapshot error:", error));
 
       const memberQ = collection(db, 'groups', selectedGroup.id, 'members');
       const detachMem = onSnapshot(memberQ, (snapshot) => {
         setMembers(snapshot.docs.map(doc => ({ ...doc.data() } as GroupMember)));
+        if (snapshot.metadata.hasPendingWrites) setIsSyncing(true);
       }, (error) => console.error("Group Members Snapshot error:", error));
 
       return () => {
@@ -1370,6 +1393,26 @@ export default function App() {
           </div>
           
           <div className="flex items-center gap-4 ml-auto lg:ml-0">
+            {/* Sync & Offline Status */}
+            <div className="hidden sm:flex items-center gap-2 px-2 py-1 rounded-full bg-slate-50 border border-slate-100">
+              {isSyncing ? (
+                <div className="flex items-center gap-1.5 text-[9px] font-bold text-amber-600 uppercase tracking-tight">
+                  <RotateCw size={10} className="animate-spin" />
+                  {lang === 'bn' ? 'সিঙ্ক হচ্ছে' : 'Syncing'}
+                </div>
+              ) : isOnline ? (
+                <div className="flex items-center gap-1.5 text-[9px] font-bold text-emerald-600 uppercase tracking-tight">
+                  <div className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                  {lang === 'bn' ? 'অনলাইন' : 'Online'}
+                </div>
+              ) : (
+                <div className="flex items-center gap-1.5 text-[9px] font-bold text-rose-600 uppercase tracking-tight">
+                  <WifiOff size={10} />
+                  {lang === 'bn' ? 'অফলাইন' : 'Offline'}
+                </div>
+              )}
+            </div>
+
             <button 
               onClick={() => setLang(lang === 'bn' ? 'en' : 'bn')}
               className="p-2 border border-border-gray rounded-lg text-primary hover:bg-slate-50 transition-colors flex items-center gap-2 text-xs font-bold"
