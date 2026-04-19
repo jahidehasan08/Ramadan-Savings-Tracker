@@ -21,24 +21,32 @@ service cloud.firestore {
     // User Role Lookups - Simplified and Robust
     function isAppAdmin() {
       return isSignedIn() && (
-        request.auth.token.email == 'jh6854511@gmail.com' || 
-        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('appRole', '') in ['admin', 'super_admin']
+        request.auth.token.email == 'jh6854511@gmail.com' || (
+          exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('appRole', '') in ['admin', 'super_admin']
+        )
       );
     }
 
     function isApproved() {
-      let userDoc = get(/databases/$(database)/documents/users/$(request.auth.uid));
       return isSignedIn() && (
         request.auth.token.email == 'jh6854511@gmail.com' || (
-          userDoc.data.isApproved == true || 
-          userDoc.data.appRole in ['admin', 'super_admin']
+          exists(/databases/$(database)/documents/users/$(request.auth.uid)) && (
+            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('isApproved', false) == true ||
+            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('appRole', '') in ['admin', 'super_admin']
+          )
         )
       );
     }
 
     // Group-level Relational Helpers
     function isGroupMember(groupId) {
-      return isApproved();
+      return isApproved() || (
+        isSignedIn() && (
+          exists(/databases/$(database)/documents/groups/$(groupId)/members/$(request.auth.uid)) ||
+          request.auth.uid in get(/databases/$(database)/documents/groups/$(groupId)).data.members
+        )
+      );
     }
 
     function isGroupAdmin(groupId) {
@@ -92,7 +100,7 @@ service cloud.firestore {
       }
 
       // Secure List Queries (Pillar 8)
-      allow read: if isApproved();
+      allow read: if isGroupMember(groupId);
       
       allow create: if isApproved() 
         && isValidGroup(incoming())
@@ -112,7 +120,7 @@ service cloud.firestore {
             && data.role in ['owner', 'admin', 'member'];
         }
 
-        allow read: if isApproved();
+        allow read: if isGroupMember(groupId);
         
         allow create: if isApproved() && (isAppAdmin() || isGroupAdmin(groupId)) && isValidMember(incoming());
         allow update, delete: if isAppAdmin() || isGroupAdmin(groupId);
@@ -127,7 +135,7 @@ service cloud.firestore {
             && data.userId is string && data.userId.size() <= 128;
         }
 
-        allow read: if isApproved();
+        allow read: if isGroupMember(groupId);
 
         allow create: if isApproved() 
           && (isAppAdmin() || isGroupAdmin(groupId)) 
@@ -140,7 +148,7 @@ service cloud.firestore {
 
     // 6. Global Transactions Query (Collection Group)
     match /{path=**}/transactions/{txId} {
-      allow list: if isApproved();
+      allow list: if isApproved() || (isSignedIn() && resource.data.userId == request.auth.uid);
     }
   }
 }

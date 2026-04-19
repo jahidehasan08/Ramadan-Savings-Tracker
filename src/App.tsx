@@ -420,6 +420,8 @@ export default function App() {
   const [showNewPass, setShowNewPass] = useState(false);
   const [showConfirmPass, setShowConfirmPass] = useState(false);
   const [manualDepositAmount, setManualDepositAmount] = useState<string>('');
+  const [isProfileUpdating, setIsProfileUpdating] = useState(false);
+  const [photoPreview, setPhotoPreview] = useState<string | null>(null);
   
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [globalTransactions, setGlobalTransactions] = useState<Transaction[]>([]);
@@ -1026,7 +1028,7 @@ export default function App() {
 
   const updateProfileInfo = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!auth.currentUser || !userProfile) return;
+    if (!auth.currentUser || !userProfile || isProfileUpdating) return;
     
     const formData = new FormData(e.currentTarget);
     const displayName = formData.get('displayName') as string;
@@ -1035,53 +1037,83 @@ export default function App() {
     const newPassword = formData.get('newPassword') as string;
     const confirmPassword = formData.get('confirmPassword') as string;
     
+    // File size check (max 500KB for base64 in Firestore to stay under 1MB limit comfortably)
+    if (photoFile && photoFile.size > 500 * 1024) {
+      alert(lang === 'bn' ? 'ছবির সাইজ ৫০০ কেবির কম হতে হবে।' : 'Photo size must be less than 500KB.');
+      return;
+    }
+
+    setIsProfileUpdating(true);
+    
     try {
       // If changing password, validation
       if (newPassword) {
         if (newPassword !== confirmPassword) {
             alert(t.passwordMismatch);
+            setIsProfileUpdating(false);
             return;
         }
         if (newPassword.length < 6) {
             alert(t.weakPassword);
+            setIsProfileUpdating(false);
             return;
         }
         if (!oldPassword) {
             alert(lang === 'bn' ? 'পাসওয়ার্ড পরিবর্তনের জন্য পুরানো পাসওয়ার্ড আবশ্যক।' : 'Old password is required to change password.');
+            setIsProfileUpdating(false);
             return;
         }
 
         // Re-authenticate
-        const credential = EmailAuthProvider.credential(auth.currentUser.email!, oldPassword);
-        await reauthenticateWithCredential(auth.currentUser, credential);
+        try {
+          const credential = EmailAuthProvider.credential(auth.currentUser.email!, oldPassword);
+          await reauthenticateWithCredential(auth.currentUser, credential);
+        } catch (reauthErr: any) {
+          console.error("Re-auth error:", reauthErr);
+          setIsProfileUpdating(false);
+          if (reauthErr.code === 'auth/invalid-credential' || reauthErr.code === 'auth/wrong-password') {
+            alert(lang === 'bn' ? 'আপনার বর্তমান পাসওয়ার্ডটি সঠিক নয়।' : 'Your current password is incorrect.');
+          } else {
+            alert(lang === 'bn' ? 'পাসওয়ার্ড ভেরিফিকেশনে সমস্যা হয়েছে। অনুগ্রহ করে আবার চেষ্টা করুন।' : 'Failed to verify password. Please try again.');
+          }
+          return;
+        }
       }
 
-      let photoURL = auth.currentUser.photoURL;
+      let photoURL = userProfile.photoURL;
       
       if (photoFile) {
         const reader = new FileReader();
-        const base64: string = await new Promise((resolve) => {
+        const base64: string = await new Promise((resolve, reject) => {
           reader.onload = (e) => resolve(e.target?.result as string);
+          reader.onerror = (e) => reject(e);
           reader.readAsDataURL(photoFile);
         });
         photoURL = base64;
       }
 
-      await updateProfile(auth.currentUser, { displayName, photoURL: photoURL || undefined });
+      // Update Firebase Auth display name only (Base64 is too long for Auth photoURL)
+      await updateProfile(auth.currentUser, { displayName });
       
       await updateDoc(doc(db, 'users', auth.currentUser.uid), {
         displayName,
-        photoURL: photoURL || undefined
+        photoURL: photoURL || null
       });
 
       if (newPassword) {
         await updatePassword(auth.currentUser, newPassword);
       }
 
-      alert(lang === 'bn' ? 'প্রোফাইল আপডেট সফল হয়েছে!' : 'Profile updated successfully!');
+      let successMsg = lang === 'bn' ? 'প্রোফাইল আপডেট সফল হয়েছে!' : 'Profile updated successfully!';
+      if (newPassword) {
+        successMsg = lang === 'bn' ? 'পাসওয়ার্ড এবং প্রোফাইল সফলভাবে পরিবর্তন করা হয়েছে!' : 'Password and profile updated successfully!';
+      }
+      
+      alert(successMsg);
       window.location.reload();
     } catch (err: any) {
       console.error(err);
+      setIsProfileUpdating(false);
       if (err.code === 'auth/invalid-credential' || err.code === 'auth/wrong-password') {
         alert(lang === 'bn' ? 'পুরানো পাসওয়ার্ডটি সঠিক নয়।' : 'Old password is incorrect.');
       } else {
@@ -1348,8 +1380,8 @@ export default function App() {
             <div className="text-right hidden sm:block">
               <p className="text-sm">{t.welcome}, <strong>{user?.displayName}</strong></p>
             </div>
-            {user?.photoURL ? (
-              <img src={user.photoURL} className="w-9 h-9 rounded-full border border-border-gray" alt="" referrerPolicy="no-referrer" />
+            {userProfile?.photoURL ? (
+              <img src={userProfile.photoURL} className="w-9 h-9 rounded-full border border-border-gray" alt="" referrerPolicy="no-referrer" />
             ) : (
               <div className="w-9 h-9 bg-accent rounded-full flex items-center justify-center text-white font-bold text-sm">
                 {user?.displayName?.charAt(0)}
@@ -1873,12 +1905,31 @@ export default function App() {
                     <div className="flex flex-col items-center gap-4 mb-6">
                       <div className="relative group">
                         <div className="w-24 h-24 rounded-2xl bg-slate-100 flex items-center justify-center text-3xl font-bold text-slate-400 overflow-hidden shadow-inner border-2 border-slate-50">
-                          {userProfile?.photoURL ? <img src={userProfile.photoURL} alt="" className="w-full h-full object-cover" referrerPolicy="no-referrer" /> : userProfile?.displayName?.charAt(0)}
+                          {photoPreview ? (
+                            <img src={photoPreview} alt="" className="w-full h-full object-cover" />
+                          ) : userProfile?.photoURL ? (
+                            <img src={userProfile.photoURL} alt="" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                          ) : (
+                            userProfile?.displayName?.charAt(0)
+                          )}
                         </div>
                         <label className="absolute inset-0 bg-black/40 text-white flex flex-col items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer rounded-2xl border-2 border-dashed border-white/40">
                           <Plus size={20} />
                           <span className="text-[10px] font-bold uppercase mt-1">Upload</span>
-                          <input type="file" name="photo" accept="image/*" className="hidden" />
+                          <input 
+                            type="file" 
+                            name="photo" 
+                            accept="image/*" 
+                            className="hidden" 
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              if (file) {
+                                const reader = new FileReader();
+                                reader.onload = (e) => setPhotoPreview(e.target?.result as string);
+                                reader.readAsDataURL(file);
+                              }
+                            }}
+                          />
                         </label>
                       </div>
                       <p className="text-[10px] text-slate-400 uppercase font-bold tracking-widest leading-none">{lang === 'bn' ? 'প্রোফাইল ছবি' : 'Profile Picture'}</p>
@@ -1931,8 +1982,15 @@ export default function App() {
                       </div>
                     </div>
 
-                    <button type="submit" className="btn btn-primary w-full py-4 uppercase tracking-widest font-bold text-xs">
-                      {lang === 'bn' ? 'তথ্য সেভ করুন' : 'Save Changes'}
+                    <button 
+                      type="submit" 
+                      disabled={isProfileUpdating}
+                      className="btn btn-primary w-full py-4 uppercase tracking-widest font-bold text-xs disabled:bg-slate-300 flex items-center justify-center gap-2"
+                    >
+                      {isProfileUpdating && <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />}
+                      {isProfileUpdating 
+                        ? (lang === 'bn' ? 'তথ্য সেভ হচ্ছে...' : 'Saving Changes...') 
+                        : (lang === 'bn' ? 'তথ্য সেভ করুন' : 'Save Changes')}
                     </button>
                   </form>
                   
