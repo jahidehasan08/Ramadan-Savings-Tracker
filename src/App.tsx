@@ -61,6 +61,36 @@ import { SavingsGroup, Transaction, GroupMember, UserProfile } from './types';
 import { translations } from './translations';
 
 // Components
+// Translation helper
+const getAuthErrorMessage = (error: any, lang: 'bn' | 'en') => {
+  const code = error?.code;
+  const t = translations[lang];
+  
+  switch (code) {
+    case 'auth/invalid-credential':
+    case 'auth/invalid-login-credentials':
+    case 'auth/user-not-found':
+    case 'auth/wrong-password':
+      return t.invalidCredential;
+    case 'auth/email-already-in-use':
+      return t.emailInUse;
+    case 'auth/weak-password':
+      return t.weakPassword;
+    case 'auth/requires-recent-login':
+      return t.reLoginRequired;
+    case 'auth/too-many-requests':
+      return lang === 'bn' ? 'অতিরিক্ত চেষ্টার কারণে আপনার একাউন্টটি সাময়িকভাবে ব্লক করা হয়েছে। কিছুক্ষণ পর আবার চেষ্টা করুন।' : 'Too many failed login attempts. Please try again later.';
+    case 'auth/user-disabled':
+      return lang === 'bn' ? 'এই একাউন্টটি বর্তমানে বন্ধ রাখা হয়েছে।' : 'This account has been disabled.';
+    default:
+      // If the message contains common auth strings, try to provide a generic auth error
+      if (typeof error?.message === 'string' && error.message.toLowerCase().includes('auth/')) {
+        return t.authError;
+      }
+      return error?.message || t.authError;
+  }
+};
+
 const Auth = ({ lang, setLang }: { lang: 'bn' | 'en', setLang: (l: 'bn' | 'en') => void }) => {
   const t = translations[lang];
   const [mode, setMode] = useState<'login' | 'register' | 'forgot' | 'verify_otp' | 'reset_password'>('login');
@@ -74,115 +104,57 @@ const Auth = ({ lang, setLang }: { lang: 'bn' | 'en', setLang: (l: 'bn' | 'en') 
   const [loading, setLoading] = useState(false);
   const [generatedOtp, setGeneratedOtp] = useState(''); // Simulated OTP storage
 
-  const handleSendOTP = async (e: React.FormEvent) => {
+  const handleAuthSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
-    setLoading(true);
-    try {
-      if (mode === 'register' && password !== confirmPassword) {
+    
+    if (mode === 'register') {
+      if (password !== confirmPassword) {
         setError(t.passwordMismatch);
-        setLoading(false);
         return;
       }
-      
-      // Simulation: Generate 6 digit code
-      const code = Math.floor(100000 + Math.random() * 900000).toString();
-      
-      // If registering, check if user already exists in Firestore (optional demo)
-      if (mode === 'register') {
-         const userSnap = await getDoc(doc(db, 'users', email.replace(/[@.]/g, '_'))); // demo simplified check
-         // But we should use Firestore query for real check
-         const q = firestoreQuery(collection(db, 'users'), where('email', '==', email), limit(1));
-         const snap = await getDocs(q);
-         if (!snap.empty) {
-           setError(t.accountExists);
-           setLoading(false);
-           return;
-         }
+      if (password.length < 6) {
+        setError(t.weakPassword);
+        return;
       }
-
-      setGeneratedOtp(code);
-      // In real life, send email here. In demo, show alert.
-      console.log(`[AUTH SERVICE] OTP for ${email}: ${code}`);
-      alert(`${t.otpSent}: ${code}`);
-      setMode('verify_otp');
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleVerifyOTP = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (otp === generatedOtp) {
-      if (mode === 'verify_otp' && displayName) { // We were registering
-        handleFinalRegister();
-      } else { // We were resetting
-        setMode('reset_password');
+      setLoading(true);
+      try {
+        const cred = await createUserWithEmailAndPassword(auth, email, password);
+        await updateProfile(cred.user, { displayName });
+        // Create Firestore doc
+        await setDoc(doc(db, 'users', cred.user.uid), {
+          uid: cred.user.uid,
+          email: cred.user.email,
+          displayName: displayName,
+          appRole: 'member',
+          isApproved: false,
+          createdAt: serverTimestamp()
+        });
+      } catch (err: any) {
+        setError(getAuthErrorMessage(err, lang));
+      } finally {
+        setLoading(false);
       }
-    } else {
-      setError(lang === 'bn' ? 'ভুল ওটিপি!' : 'Invalid OTP!');
-    }
-  };
-
-  const handleFinalRegister = async () => {
-    setLoading(true);
-    try {
-      const cred = await createUserWithEmailAndPassword(auth, email, password);
-      await updateProfile(cred.user, { displayName });
-      // Create Firestore doc
-      await setDoc(doc(db, 'users', cred.user.uid), {
-        uid: cred.user.uid,
-        email: cred.user.email,
-        displayName: displayName,
-        appRole: 'member',
-        isApproved: false,
-        createdAt: serverTimestamp()
-      });
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleResetPassword = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (password !== confirmPassword) {
-      setError(t.passwordMismatch);
-      return;
-    }
-    setLoading(true);
-    try {
-      // Note: Firebase doesn't allow direct password updates without login.
-      // Usually you'd use confirmPasswordReset(auth, actionCode, newPassword).
-      // Here we will use sendPasswordResetEmail as the real integration fallback.
-      await sendPasswordResetEmail(auth, email);
-      alert(lang === 'bn' ? 'পাসওয়ার্ড পরিবর্তনের লিংক আপনার ইমেইলে পাঠানো হয়েছে। অনুগ্রহ করে ইমেইল চেক করুন।' : 'A password reset link has been sent to your email. Please check your inbox.');
-      setMode('login');
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError('');
-    setLoading(true);
-    try {
-      await signInWithEmailAndPassword(auth, email, password);
-    } catch (err: any) {
-      console.error(err);
-      let msg = t.authError;
-      if (err.code === 'auth/invalid-credential') {
-        msg = t.invalidCredential;
+    } else if (mode === 'forgot') {
+      setLoading(true);
+      try {
+        await sendPasswordResetEmail(auth, email);
+        alert(lang === 'bn' ? 'পাসওয়ার্ড পরিবর্তনের অরিজিনাল লিংক আপনার ইমেইলে পাঠানো হয়েছে। অনুগ্রহ করে ইনবক্স (বা স্প্যাম) চেক করুন।' : 'A real password reset link has been sent to your email. Please check your inbox (or spam).');
+        setMode('login');
+      } catch (err: any) {
+        setError(getAuthErrorMessage(err, lang));
+      } finally {
+        setLoading(false);
       }
-      setError(msg);
-    } finally {
-      setLoading(false);
+    } else if (mode === 'login') {
+      setLoading(true);
+      try {
+        await signInWithEmailAndPassword(auth, email, password);
+      } catch (err: any) {
+        setError(getAuthErrorMessage(err, lang));
+      } finally {
+        setLoading(false);
+      }
     }
   };
 
@@ -190,8 +162,7 @@ const Auth = ({ lang, setLang }: { lang: 'bn' | 'en', setLang: (l: 'bn' | 'en') 
     try {
       await signInWithGoogle();
     } catch (err: any) {
-      console.error(err);
-      setError(err.message || t.googleAuthError);
+      setError(getAuthErrorMessage(err, lang));
     }
   };
 
@@ -223,8 +194,17 @@ const Auth = ({ lang, setLang }: { lang: 'bn' | 'en', setLang: (l: 'bn' | 'en') 
           </div>
         )}
 
-        {mode === 'login' && (
-          <form onSubmit={handleLogin} className="space-y-4 mb-6">
+        {(mode === 'login' || mode === 'register') && (
+          <form onSubmit={handleAuthSubmit} className="space-y-4 mb-6">
+            {mode === 'register' && (
+              <div className="space-y-1.5">
+                <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">{t.name}</label>
+                <div className="relative">
+                  <input type="text" required value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder={lang === 'bn' ? "আব্দুল করিম" : "John Doe"} className="input pr-10" />
+                  <Users className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-300" size={16} />
+                </div>
+              </div>
+            )}
             <div className="space-y-1.5">
               <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">{t.email}</label>
               <div className="relative">
@@ -235,7 +215,7 @@ const Auth = ({ lang, setLang }: { lang: 'bn' | 'en', setLang: (l: 'bn' | 'en') 
             <div className="space-y-1.5">
               <div className="flex justify-between items-center px-1">
                 <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest">{t.password}</label>
-                <button type="button" onClick={() => setMode('forgot')} className="text-[10px] text-primary font-bold hover:underline">{t.forgotPassword}</button>
+                {mode === 'login' && <button type="button" onClick={() => setMode('forgot')} className="text-[10px] text-primary font-bold hover:underline">{t.forgotPassword}</button>}
               </div>
               <div className="relative">
                 <input type={showPassword ? "text" : "password"} required value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" className="input pr-10" />
@@ -244,20 +224,22 @@ const Auth = ({ lang, setLang }: { lang: 'bn' | 'en', setLang: (l: 'bn' | 'en') 
                 </button>
               </div>
             </div>
+            {mode === 'register' && (
+              <div className="space-y-1.5">
+                <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">{t.confirmPassword}</label>
+                <input type={showPassword ? "text" : "password"} required value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder="••••••••" className="input pr-10" />
+              </div>
+            )}
             <button type="submit" disabled={loading} className="btn btn-primary w-full py-4 shadow-lg flex items-center justify-center gap-2">
-              {loading ? <div className="w-4 h-4 border-2 border-white/20 border-t-white rounded-full animate-spin" /> : t.login}
+              {loading ? <div className="w-4 h-4 border-2 border-white/20 border-t-white rounded-full animate-spin" /> : (mode === 'login' ? t.login : t.register)}
             </button>
           </form>
         )}
 
-        {(mode === 'register' || mode === 'forgot') && (
-          <form onSubmit={handleSendOTP} className="space-y-4 mb-6">
-            {mode === 'register' && (
-              <div className="space-y-1.5">
-                <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">{t.name}</label>
-                <input type="text" required value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder={lang === 'bn' ? "আব্দুল করিম" : "John Doe"} className="input" />
-              </div>
-            )}
+        {mode === 'forgot' && (
+          <form onSubmit={handleAuthSubmit} className="space-y-4 mb-6">
+            <h2 className="text-sm font-bold text-slate-700 mb-2">{t.forgotPassword}</h2>
+            <p className="text-[10px] text-slate-500 mb-4">{lang === 'bn' ? 'আপনার ইমেইল দিন, আমরা পাসওয়ার্ড পরিবর্তনের অরিজিনাল লিংক পাঠিয়ে দেব।' : 'Enter your email to receive a password reset link.'}</p>
             <div className="space-y-1.5">
               <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">{t.email}</label>
               <div className="relative">
@@ -265,72 +247,11 @@ const Auth = ({ lang, setLang }: { lang: 'bn' | 'en', setLang: (l: 'bn' | 'en') 
                 <Mail className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-300" size={16} />
               </div>
             </div>
-            {mode === 'register' && (
-              <>
-                <div className="space-y-1.5">
-                  <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">{t.password}</label>
-                  <div className="relative">
-                    <input type={showPassword ? "text" : "password"} required value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" className="input pr-10" />
-                    <button type="button" onClick={() => setShowPassword(!showPassword)} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-300 hover:text-primary transition-colors text-xs font-bold">
-                      {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
-                    </button>
-                  </div>
-                </div>
-                <div className="space-y-1.5">
-                  <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">{t.confirmPassword}</label>
-                  <div className="relative">
-                    <input type={showPassword ? "text" : "password"} required value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder="••••••••" className="input pr-10" />
-                  </div>
-                </div>
-              </>
-            )}
             <button type="submit" disabled={loading} className="btn btn-primary w-full py-4 shadow-lg flex items-center justify-center gap-2">
-              {loading ? <div className="w-4 h-4 border-2 border-white/20 border-t-white rounded-full animate-spin" /> : t.sendOTP}
+              {loading ? <div className="w-4 h-4 border-2 border-white/20 border-t-white rounded-full animate-spin" /> : (lang === 'bn' ? 'লিংক পাঠান' : 'Send Reset Link')}
             </button>
-            <button type="button" onClick={() => setMode('login')} className="w-full text-center text-xs text-slate-400 font-bold hover:text-primary transition-colors">
-               {lang === 'bn' ? 'লগইন-এ ফিরে যান' : 'Back to Login'}
-            </button>
-          </form>
-        )}
-
-        {mode === 'verify_otp' && (
-          <form onSubmit={handleVerifyOTP} className="space-y-4 mb-6 text-center">
-            <div className="w-12 h-12 bg-amber-50 text-amber-600 rounded-full flex items-center justify-center mx-auto mb-4">
-               <ShieldCheck size={24} />
-            </div>
-            <h3 className="text-lg font-bold">{t.verifyOTP}</h3>
-            <p className="text-[11px] text-slate-500">{t.otpSent}</p>
-            <div className="space-y-1.5 text-left">
-              <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">{t.enterOTP}</label>
-              <input type="text" required maxLength={6} value={otp} onChange={(e) => setOtp(e.target.value.replace(/\D/g, ''))} placeholder="000000" className="input text-center text-xl tracking-[0.5em] font-mono" />
-            </div>
-            <button type="submit" disabled={loading} className="btn btn-primary w-full py-4 shadow-lg uppercase tracking-widest text-[10px] font-bold">
-              {t.verifyOTP}
-            </button>
-            <button type="button" onClick={() => setMode('login')} className="text-xs text-slate-400 font-bold hover:text-primary transition-colors">
-               {lang === 'bn' ? 'বাতিল করুন' : 'Cancel'}
-            </button>
-          </form>
-        )}
-
-        {mode === 'reset_password' && (
-          <form onSubmit={handleResetPassword} className="space-y-4 mb-6">
-            <div className="text-center mb-6">
-              <div className="w-12 h-12 bg-emerald-50 text-emerald-600 rounded-full flex items-center justify-center mx-auto mb-4">
-                 <Lock size={24} />
-              </div>
-              <h3 className="text-lg font-bold">{lang === 'bn' ? 'নতুন পাসওয়ার্ড সেট করুন' : 'Reset Password'}</h3>
-            </div>
-            <div className="space-y-1.5">
-              <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">{t.newPassword}</label>
-              <input type="password" required value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" className="input" />
-            </div>
-            <div className="space-y-1.5">
-              <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">{t.confirmPassword}</label>
-              <input type="password" required value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder="••••••••" className="input" />
-            </div>
-            <button type="submit" disabled={loading} className="btn btn-primary w-full py-4 shadow-lg uppercase tracking-widest text-[10px] font-bold">
-              {lang === 'bn' ? 'পাসওয়ার্ড নিশ্চিত করুন' : 'Update Password'}
+            <button type="button" onClick={() => setMode('login')} className="w-full text-[10px] text-slate-400 font-bold uppercase tracking-widest py-2 active:scale-95 transition-transform">
+              {lang === 'bn' ? 'লগইন-এ ফিরে যান' : 'Back to Login'}
             </button>
           </form>
         )}
@@ -1092,13 +1013,8 @@ export default function App() {
           const credential = EmailAuthProvider.credential(auth.currentUser.email!, oldPassword);
           await reauthenticateWithCredential(auth.currentUser, credential);
         } catch (reauthErr: any) {
-          console.error("Re-auth error:", reauthErr);
           setIsProfileUpdating(false);
-          if (reauthErr.code === 'auth/invalid-credential' || reauthErr.code === 'auth/wrong-password') {
-            alert(lang === 'bn' ? 'আপনার বর্তমান পাসওয়ার্ডটি সঠিক নয়।' : 'Your current password is incorrect.');
-          } else {
-            alert(lang === 'bn' ? 'পাসওয়ার্ড ভেরিফিকেশনে সমস্যা হয়েছে। অনুগ্রহ করে আবার চেষ্টা করুন।' : 'Failed to verify password. Please try again.');
-          }
+          alert(getAuthErrorMessage(reauthErr, lang));
           return;
         }
       }
@@ -1135,13 +1051,8 @@ export default function App() {
       alert(successMsg);
       window.location.reload();
     } catch (err: any) {
-      console.error(err);
       setIsProfileUpdating(false);
-      if (err.code === 'auth/invalid-credential' || err.code === 'auth/wrong-password') {
-        alert(lang === 'bn' ? 'পুরানো পাসওয়ার্ডটি সঠিক নয়।' : 'Old password is incorrect.');
-      } else {
-        alert(`Error: ${err.message}`);
-      }
+      alert(getAuthErrorMessage(err, lang));
     }
   };
 
@@ -1155,15 +1066,10 @@ export default function App() {
       // Also cleanup Firestore
       await deleteDoc(doc(db, 'users', uid));
       await deleteUser(auth.currentUser);
-      alert(lang === 'bn' ? 'অ্যাকাউন্ট ডিলিট করা হয়েছে।' : 'Account deleted successfully.');
+      alert(lang === 'bn' ? 'অ্যাকাউন্ট ডিলিট করা হয়েছে। ' : 'Account deleted successfully.');
       window.location.reload();
     } catch (err: any) {
-      console.error(err);
-      if (err.code === 'auth/requires-recent-login') {
-        alert(lang === 'bn' ? 'নিরাপত্তার স্বার্থে এই কাজটি করার জন্য আপনাকে পুনরায় লগইন করে আসতে হবে।' : 'For security, please re-login before deleting your account.');
-      } else {
-        alert(`Error: ${err.message}`);
-      }
+      alert(getAuthErrorMessage(err, lang));
     }
   };
 
