@@ -1,9 +1,11 @@
-import { Timestamp } from 'firebase/firestore';
+import { Timestamp } from './lib/firebase';
 
 export interface UserProfile {
   uid: string;
   email: string;
   displayName: string;
+  phone?: string;
+  isManual?: boolean;
   photoURL?: string | null;
   createdAt: Timestamp;
   isApproved: boolean;

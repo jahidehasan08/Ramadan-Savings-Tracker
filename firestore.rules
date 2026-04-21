@@ -18,7 +18,15 @@ service cloud.firestore {
     function incoming() { return request.resource.data; }
     function existing() { return resource.data; }
     
-    // User Role Lookups - Simplified and Robust
+    function isSuperAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == 'jh6854511@gmail.com' || (
+          exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('appRole', '') == 'super_admin'
+        )
+      );
+    }
+
     function isAppAdmin() {
       return isSignedIn() && (
         request.auth.token.email == 'jh6854511@gmail.com' || (
@@ -44,16 +52,21 @@ service cloud.firestore {
       return isApproved() || (
         isSignedIn() && (
           exists(/databases/$(database)/documents/groups/$(groupId)/members/$(request.auth.uid)) ||
-          request.auth.uid in get(/databases/$(database)/documents/groups/$(groupId)).data.members
+          (exists(/databases/$(database)/documents/groups/$(groupId)) && (
+            request.auth.uid in get(/databases/$(database)/documents/groups/$(groupId)).data.members ||
+            get(/databases/$(database)/documents/groups/$(groupId)).data.createdBy == request.auth.uid
+          ))
         )
       );
     }
 
     function isGroupAdmin(groupId) {
       return isAppAdmin() || (
-        isSignedIn() && 
-        exists(/databases/$(database)/documents/groups/$(groupId)/members/$(request.auth.uid)) &&
-        get(/databases/$(database)/documents/groups/$(groupId)/members/$(request.auth.uid)).data.get('role', '') in ['owner', 'admin']
+        isSignedIn() && (
+          (exists(/databases/$(database)/documents/groups/$(groupId)) && get(/databases/$(database)/documents/groups/$(groupId)).data.createdBy == request.auth.uid) ||
+          (exists(/databases/$(database)/documents/groups/$(groupId)/members/$(request.auth.uid)) &&
+           get(/databases/$(database)/documents/groups/$(groupId)/members/$(request.auth.uid)).data.get('role', '') in ['owner', 'admin'])
+        )
       );
     }
 
@@ -64,6 +77,8 @@ service cloud.firestore {
           && data.email is string && data.email.size() <= 256
           && data.displayName is string && data.displayName.size() <= 100
           && (data.get('photoURL', null) == null || (data.photoURL is string && data.photoURL.size() <= 2048))
+          && (data.get('phone', '') is string && data.phone.size() <= 20)
+          && (data.get('isManual', false) is bool)
           && data.appRole in ['super_admin', 'admin', 'member']
           && data.isApproved is bool;
       }
@@ -71,21 +86,28 @@ service cloud.firestore {
       allow list: if isSignedIn() && (isAppAdmin() || (resource.data.isApproved == true));
       allow get: if isSignedIn() && (isOwner(userId) || isAppAdmin() || (resource.data.isApproved == true));
       
-      allow create: if isOwner(userId)
+      allow create: if (isOwner(userId)
         && incoming().keys().hasAll(['uid', 'email', 'displayName', 'createdAt', 'isApproved', 'appRole'])
-        && incoming().keys().size() == 6
-        && isValidUser(incoming())
         && incoming().uid == userId
         && incoming().email == request.auth.token.email
         && (
           (incoming().email == 'jh6854511@gmail.com' && incoming().appRole == 'super_admin' && incoming().isApproved == true) ||
           (incoming().appRole == 'member' && incoming().isApproved == false)
-        );
+        )
+      ) || (
+        isAppAdmin()
+        && incoming().get('isManual', false) == true
+        && incoming().appRole == 'member'
+        && incoming().isApproved == true
+      );
 
       allow update: if isSignedIn() && (
+        request.auth.token.email == 'jh6854511@gmail.com' ||
         (isAppAdmin() && isValidUser(incoming())) ||
         (isOwner(userId) && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL']))
       );
+
+      allow delete: if isOwner(userId) || isSuperAdmin();
     }
 
     // 3. Savings Groups
@@ -104,8 +126,7 @@ service cloud.firestore {
       
       allow create: if isApproved() 
         && isValidGroup(incoming())
-        && incoming().createdBy == request.auth.uid
-        && incoming().members.hasAll([request.auth.uid]);
+        && incoming().createdBy == request.auth.uid;
 
       allow update: if (isAppAdmin() || isGroupAdmin(groupId))
         && isValidGroup(incoming())

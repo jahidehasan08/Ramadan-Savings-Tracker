@@ -1,8 +1,19 @@
 import React, { useEffect, useState, useMemo } from 'react';
-import { onAuthStateChanged, User } from 'firebase/auth';
-import jsPDF from 'jspdf';
-import autoTable from 'jspdf-autotable';
 import { 
+  auth, 
+  db, 
+  signInWithGoogle, 
+  logOut, 
+  createUserWithEmailAndPassword, 
+  signInWithEmailAndPassword, 
+  updateProfile, 
+  updatePassword, 
+  deleteUser, 
+  reauthenticateWithCredential, 
+  EmailAuthProvider, 
+  sendPasswordResetEmail, 
+  onAuthStateChanged,
+  User,
   collection,
   where,
   onSnapshot, 
@@ -20,7 +31,9 @@ import {
   writeBatch,
   query as firestoreQuery,
   Timestamp
-} from 'firebase/firestore';
+} from './lib/firebase';
+import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Wallet, 
@@ -55,7 +68,6 @@ import {
   WifiOff,
   RotateCw
 } from 'lucide-react';
-import { auth, db, signInWithGoogle, logOut, createUserWithEmailAndPassword, signInWithEmailAndPassword, updateProfile, updatePassword, deleteUser, reauthenticateWithCredential, EmailAuthProvider, sendPasswordResetEmail } from './lib/firebase';
 import { cn, formatCurrency, formatNumber } from './lib/utils';
 import { SavingsGroup, Transaction, GroupMember, UserProfile } from './types';
 import { translations } from './translations';
@@ -419,6 +431,15 @@ export default function App() {
   const [members, setMembers] = useState<GroupMember[]>([]);
   const [allUsers, setAllUsers] = useState<UserProfile[]>([]);
 
+  // Permission helpers
+  const isAppAdmin = userProfile?.appRole === 'admin' || userProfile?.appRole === 'super_admin';
+  const isGroupCreator = selectedGroup?.createdBy === user?.uid;
+  const isGroupAdmin = useMemo(() => {
+    const member = members.find(m => m.uid === user?.uid);
+    return member?.role === 'admin' || member?.role === 'owner';
+  }, [members, user]);
+  const canManageGroup = isAppAdmin || isGroupCreator || isGroupAdmin;
+
   // Filtering states
   const [filterMonth, setFilterMonth] = useState<number>(new Date().getMonth());
   const [filterYear, setFilterYear] = useState<number>(new Date().getFullYear());
@@ -462,7 +483,12 @@ export default function App() {
     }
   };
 
-  const [confirmDelete, setConfirmDelete] = useState<{ type: 'group' | 'member' | 'tx', id: string, secondaryId?: string } | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<{ 
+    type: 'group' | 'member' | 'tx' | 'user', 
+    id: string, 
+    secondaryId?: string,
+    displayName?: string 
+  } | null>(null);
 
   const deleteGroup = async (groupId: string) => {
     if (userProfile?.appRole !== 'admin' && userProfile?.appRole !== 'super_admin') {
@@ -505,17 +531,33 @@ export default function App() {
       alert(lang === 'bn' ? 'আপনার এই কাজটি করার অনুমতি নেই' : 'You do not have permission to do this');
       return;
     }
+    
     try {
-      // 1. Delete from subcollection
-      await deleteDoc(doc(db, 'groups', groupId, 'members', memberUid));
+      // 1. Check if it's a manual member to cleanup their global profile too
+      const memberRef = doc(db, 'groups', groupId, 'members', memberUid);
+      const memberSnap = await getDoc(memberRef);
+      const isManual = memberSnap.exists() && memberSnap.data()?.isManual;
+
+      // 2. Delete from subcollection
+      await deleteDoc(memberRef);
       
-      // 2. Also update the group document's members array
+      // 3. Cleanup global user profile if it's a manual member
+      if (isManual) {
+        await deleteDoc(doc(db, 'users', memberUid));
+      }
+      
+      // 4. Update the group document's members array and goalAmount
       const groupRef = doc(db, 'groups', groupId);
       const groupSnap = await getDoc(groupRef);
       if (groupSnap.exists()) {
         const groupData = groupSnap.data() as SavingsGroup;
-        const updatedMembers = groupData.members.filter(id => id !== memberUid);
-        const newGoalAmount = updatedMembers.length * (groupData.monthlyAmount || 0) * (groupData.durationMonths || 1);
+        const updatedMembers = (groupData.members || []).filter(id => id !== memberUid);
+        
+        // Correct calculation including previous year balance
+        const monthlyAmount = groupData.monthlyAmount || 0;
+        const durationMonths = groupData.durationMonths || 12;
+        const prevBalance = groupData.previousYearBalancePerPerson || 0;
+        const newGoalAmount = updatedMembers.length * (monthlyAmount * durationMonths + prevBalance);
         
         await updateDoc(groupRef, { 
           members: updatedMembers,
@@ -528,10 +570,10 @@ export default function App() {
         }
       }
       
-      alert(lang === 'bn' ? 'সদস্যকে রিমুভ করা হয়েছে' : 'Member removed successfully');
+      alert(lang === 'bn' ? 'সদস্যকে সফলভাবে রিমুভ করা হয়েছে' : 'Member removed successfully');
       setConfirmDelete(null);
     } catch (err: any) {
-      console.error(err);
+      console.error("Delete member error:", err);
       alert(lang === 'bn' ? `রিমুভ করতে ত্রুটি হয়েছে: ${err.message}` : `Error removing member: ${err.message}`);
     }
   };
@@ -596,7 +638,12 @@ export default function App() {
           setUserProfile(profile);
           
           detachProfile = onSnapshot(userRef, (s) => {
-            if (s.exists()) setUserProfile(s.data() as UserProfile);
+            if (s.exists()) {
+              setUserProfile(s.data() as UserProfile);
+            } else if (u.email !== 'jh6854511@gmail.com') {
+              // If the profile was deleted by an admin, log the user out
+              logOut();
+            }
           }, (error) => console.error("Profile Snapshot error:", error));
         } else {
           setUserProfile(null);
@@ -653,7 +700,7 @@ export default function App() {
         : firestoreQuery(collection(db, 'users'), where('isApproved', '==', true));
 
       const detachAllUsers = onSnapshot(q, (snapshot) => {
-        const users = snapshot.docs.map(doc => doc.data() as UserProfile);
+        const users = snapshot.docs.map(doc => ({ ...doc.data(), uid: doc.id } as UserProfile));
         // Sort admins up, then by name
         const sorted = [...users].sort((a, b) => {
           if (a.appRole === 'super_admin') return -1;
@@ -777,7 +824,12 @@ export default function App() {
       setSelectedGroup(groups[0]);
     } else if (selectedGroup) {
       const fresh = groups.find(g => g.id === selectedGroup.id);
-      if (fresh) setSelectedGroup(fresh);
+      if (fresh) {
+        setSelectedGroup(fresh);
+      } else {
+        // If the selected group is no longer in the groups list (deleted)
+        setSelectedGroup(groups.length > 0 ? groups[0] : null);
+      }
     }
   }, [groups]);
 
@@ -794,7 +846,7 @@ export default function App() {
 
       const memberQ = collection(db, 'groups', selectedGroup.id, 'members');
       const detachMem = onSnapshot(memberQ, (snapshot) => {
-        setMembers(snapshot.docs.map(doc => ({ ...doc.data() } as GroupMember)));
+        setMembers(snapshot.docs.map(doc => ({ ...doc.data(), uid: doc.id } as GroupMember)));
         if (snapshot.metadata.hasPendingWrites) setIsSyncing(true);
       }, (error) => console.error("Group Members Snapshot error:", error));
 
@@ -816,8 +868,8 @@ export default function App() {
     const description = formData.get('description') as string;
     const previousYearBalance = Number(formData.get('previousYearBalance') || 0);
     
-    // Calculate initial goal amount (1 member * monthly * duration)
-    const goalAmount = (1 * monthlyAmount * durationMonths) + previousYearBalance;
+    // Initial goal amount is 0 as there are no members yet
+    const goalAmount = 0;
     
     // Construct start date
     const startDate = new Date(
@@ -845,16 +897,8 @@ export default function App() {
         endDate: Timestamp.fromDate(endDate),
         createdBy: user.uid,
         createdAt: serverTimestamp(),
-        members: [user.uid],
+        members: [],
         status: 'active'
-      });
-
-      await setDoc(doc(db, 'groups', groupRef.id, 'members', user.uid), {
-        uid: user.uid,
-        displayName: user.displayName,
-        email: user.email,
-        role: 'owner',
-        joinedAt: serverTimestamp()
       });
 
       setShowCreateModal(false);
@@ -913,6 +957,13 @@ export default function App() {
     const formData = new FormData(e.currentTarget);
     
     try {
+      const groupRef = doc(db, 'groups', selectedGroup.id);
+      const groupSnap = await getDoc(groupRef);
+      if (!groupSnap.exists()) {
+        alert(lang === 'bn' ? 'এই গ্রুপটি আর নেই।' : 'This group no longer exists.');
+        return;
+      }
+
       if (isManualAdd) {
         const name = formData.get('name') as string;
         const phone = formData.get('phone') as string;
@@ -931,8 +982,20 @@ export default function App() {
           displayName: name,
           phone: phone || '',
           isManual: true,
-          role: 'member',
+          role: manualUid === selectedGroup.createdBy ? 'owner' : 'member',
           joinedAt: serverTimestamp()
+        });
+
+        // Also create a global user profile for the manual member
+        await setDoc(doc(db, 'users', manualUid), {
+          uid: manualUid,
+          displayName: name,
+          email: `${manualUid}@manual.com`, // Placeholder email
+          phone: phone || '',
+          isManual: true,
+          isApproved: true,
+          appRole: 'member',
+          createdAt: serverTimestamp()
         });
       } else {
         const email = formData.get('email') as string;
@@ -958,7 +1021,7 @@ export default function App() {
           uid: newUser.uid,
           displayName: newUser.displayName,
           email: newUser.email,
-          role: 'member',
+          role: newUser.uid === selectedGroup.createdBy ? 'owner' : 'member',
           joinedAt: serverTimestamp()
         });
       }
@@ -1057,19 +1120,94 @@ export default function App() {
   };
 
   const deleteAccount = async () => {
-    if (!auth.currentUser) return;
-    const confirmed = window.confirm(lang === 'bn' ? 'আপনি কি নিশ্চিত যে আপনি আপনার অ্যাকাউন্টটি চিরস্থায়ীভাবে ডিলিট করতে চান?' : 'Are you sure you want to delete your account permanently?');
+    if (!auth.currentUser || !user) return;
+    const confirmed = window.confirm(lang === 'bn' ? 'আপনি কি নিশ্চিত যে আপনি আপনার অ্যাকাউন্টটি চিরস্থায়ীভাবে ডিলিট করতে চান? এটি আর ফিরে পাওয়া যাবে না।' : 'Are you sure you want to delete your account permanently? This action cannot be undone.');
     if (!confirmed) return;
     
     try {
-      const uid = auth.currentUser.uid;
-      // Also cleanup Firestore
+      const uid = user.uid;
+      const currentUser = auth.currentUser;
+      
+      // 1. Delete Firestore record FIRST while still authenticated
       await deleteDoc(doc(db, 'users', uid));
-      await deleteUser(auth.currentUser);
-      alert(lang === 'bn' ? 'অ্যাকাউন্ট ডিলিট করা হয়েছে। ' : 'Account deleted successfully.');
+      
+      // 2. Then delete the Auth user
+      await deleteUser(currentUser);
+      
+      alert(lang === 'bn' ? 'অ্যাকাউন্ট সফলভাবে ডিলিট করা হয়েছে।' : 'Account deleted successfully.');
       window.location.reload();
     } catch (err: any) {
-      alert(getAuthErrorMessage(err, lang));
+      if (err.code === 'auth/requires-recent-login') {
+        alert(lang === 'bn' ? 'নিরাপত্তার জন্য, অ্যাকাউন্ট ডিলিট করার আগে আপনাকে পুনরায় লগইন করতে হবে। অনুগ্রহ করে লগআউট করে আবার লগইন করুন।' : 'For security reasons, you must re-authenticate (log out and log in again) before deleting your account.');
+      } else {
+        alert(getAuthErrorMessage(err, lang));
+      }
+    }
+  };
+
+  const handleAdminDeleteClick = (targetUid: string, targetDisplayName: string) => {
+    // Double check permissions
+    const isSuper = user?.email === 'jh6854511@gmail.com' || userProfile?.appRole === 'super_admin';
+    if (!isSuper) {
+      alert(lang === 'bn' ? 'আপনার এই কাজটি করার অনুমতি নেই।' : 'You do not have permission to do this.');
+      return;
+    }
+    
+    if (targetUid === user?.uid) {
+      alert(lang === 'bn' ? 'আপনি নিজের প্রোফাইল সেটিংস থেকে ডিলিট করতে পারবেন না।' : 'You cannot delete your own profile from here. Use settings.');
+      return;
+    }
+
+    setConfirmDelete({
+      type: 'user',
+      id: targetUid,
+      displayName: targetDisplayName
+    });
+  };
+
+  const deleteUserByAdmin = async (targetUid: string) => {
+    try {
+      // 1. Find all groups where this user is a member or has a subcollection doc
+      const groupsRef = collection(db, 'groups');
+      const groupsSnap = await getDocs(groupsRef);
+      
+      const cleanupPromises = groupsSnap.docs.map(async (groupDoc) => {
+        const groupData = groupDoc.data() as SavingsGroup;
+        if (groupData.members && groupData.members.includes(targetUid)) {
+          // Remove from members array
+          const updatedMembers = groupData.members.filter(id => id !== targetUid);
+          
+          // Re-calculate goalAmount (simplified - use stored monthlyAmount/duration)
+          const monthlyAmount = groupData.monthlyAmount || 0;
+          const duration = groupData.durationMonths || 12;
+          const prevBalance = groupData.previousYearBalancePerPerson || 0;
+          const newGoal = updatedMembers.length * (monthlyAmount * duration + prevBalance);
+          
+          await updateDoc(doc(db, 'groups', groupDoc.id), {
+            members: updatedMembers,
+            goalAmount: newGoal
+          });
+          
+          // Remove from members subcollection
+          await deleteDoc(doc(db, 'groups', groupDoc.id, 'members', targetUid));
+        }
+      });
+
+      await Promise.all(cleanupPromises);
+
+      // 2. Finally delete global profile
+      await deleteDoc(doc(db, 'users', targetUid));
+      
+      alert(lang === 'bn' ? 'ইউজার এবং তার সকল গ্রুপ মেম্বারশিপ সফলভাবে ডিলিট করা হয়েছে।' : 'User and all group memberships deleted successfully.');
+      setConfirmDelete(null);
+    } catch (err: any) {
+      console.error("Delete user error:", err);
+      // Fallback for permission errors even if UI thought we were admin
+      if (err.code === 'permission-denied') {
+        alert(lang === 'bn' ? 'দুঃখিত, সার্ভার আপনার ডিলিট করার অনুরোধ প্রত্যাখ্যান করেছে। অনুগ্রহ করে পেজটি রিফ্রেশ করে আবার চেষ্টা করুন।' : 'Permission denied. Please refresh the page and try again.');
+      } else {
+        alert(lang === 'bn' ? `ডিলিট করতে সমস্যা হয়েছে: ${err.message}` : `Error deleting user: ${err.message}`);
+      }
     }
   };
 
@@ -1368,7 +1506,7 @@ export default function App() {
                     <div className="flex items-center gap-2 text-text-light text-xs font-semibold uppercase tracking-wider">
                       <span className="text-primary truncate">{selectedGroup.name}</span>
                     </div>
-                    {(userProfile?.appRole === 'admin' || userProfile?.appRole === 'super_admin') && (
+                    {canManageGroup && (
                       <button 
                         onClick={() => setConfirmDelete({ type: 'group', id: selectedGroup.id })}
                         className="flex items-center gap-1.5 text-rose-500 hover:text-rose-700 font-bold transition-colors"
@@ -1475,7 +1613,7 @@ export default function App() {
                               setShowAddTxModal(true);
                               if (members.length > 0) setTargetUserId(members[0].uid);
                             }}
-                            disabled={!userProfile?.isApproved || (userProfile.appRole !== 'admin' && userProfile.appRole !== 'super_admin')}
+                            disabled={!userProfile?.isApproved || !canManageGroup}
                             className="btn btn-primary disabled:bg-slate-300 disabled:shadow-none"
                           >
                             + {t.newTransaction}
@@ -1531,7 +1669,7 @@ export default function App() {
                                         )}>
                                           {tx.type === 'deposit' ? t.deposit : t.withdrawal}
                                         </span>
-                                        {(userProfile?.appRole === 'admin' || userProfile?.appRole === 'super_admin') && (
+                                        {canManageGroup && (
                                            <button 
                                              onClick={() => setConfirmDelete({ type: 'tx', id: selectedGroup.id, secondaryId: tx.id })}
                                              className="p-1 text-slate-300 hover:text-rose-500 transition-colors"
@@ -1556,7 +1694,7 @@ export default function App() {
                         <div className="card-header flex justify-between items-center">
                           <h3 className="text-lg font-bold">{t.members}</h3>
                           <div className="flex gap-2 no-print">
-                            {(userProfile?.appRole === 'admin' || userProfile?.appRole === 'super_admin') && (
+                            {canManageGroup && (
                                <button 
                                   onClick={() => setShowAddMemberModal(true)}
                                   disabled={!userProfile?.isApproved}
@@ -1581,7 +1719,7 @@ export default function App() {
                                   <div>
                                     <div className="flex items-center gap-2">
                                       <p className="text-sm font-bold truncate max-w-[100px]">{member.displayName}</p>
-                                      {(userProfile?.appRole === 'admin' || userProfile?.appRole === 'super_admin') && member.role !== 'owner' && (
+                                      {canManageGroup && member.role !== 'owner' && (
                                         <button 
                                           onClick={() => setConfirmDelete({ type: 'member', id: selectedGroup.id, secondaryId: member.uid })}
                                           className="opacity-0 group-hover:opacity-100 text-slate-300 hover:text-rose-500 transition-all"
@@ -1601,7 +1739,7 @@ export default function App() {
                                 </div>
                               </div>
                             )})}
-                          {(userProfile?.appRole === 'admin' || userProfile?.appRole === 'super_admin') && (
+                          {canManageGroup && (
                             <button 
                                onClick={() => setShowAddMemberModal(true)}
                                disabled={!userProfile?.isApproved}
@@ -1697,17 +1835,29 @@ export default function App() {
                             </div>
                           </td>
                           <td className="data-table-td">
-                            {u.appRole !== 'super_admin' && (
-                              <button 
-                                onClick={() => toggleApproval(u.uid, u.isApproved)}
-                                className={cn(
-                                  "btn py-1.5 px-3 text-[11px] font-bold",
-                                  u.isApproved ? t.cancelApproval : t.approve
-                                )}
-                              >
-                                {u.isApproved ? t.cancelApproval : t.approve}
-                              </button>
-                            )}
+                            <div className="flex items-center gap-2">
+                              {u.appRole !== 'super_admin' && (
+                                <button 
+                                  onClick={() => toggleApproval(u.uid, u.isApproved)}
+                                  className={cn(
+                                    "btn py-1.5 px-3 text-[11px] font-bold",
+                                    u.isApproved ? t.cancelApproval : t.approve
+                                  )}
+                                >
+                                  {u.isApproved ? t.cancelApproval : t.approve}
+                                </button>
+                              )}
+                              
+                              {userProfile?.appRole === 'super_admin' && u.appRole !== 'super_admin' && (
+                                <button 
+                                  onClick={() => handleAdminDeleteClick(u.uid, u.displayName)}
+                                  className="p-2 text-rose-500 hover:bg-rose-50 rounded-lg transition-colors border border-rose-100"
+                                  title={lang === 'bn' ? 'ইউজার ডিলিট করুন' : 'Delete User'}
+                                >
+                                  <Trash2 size={16} />
+                                </button>
+                              )}
+                            </div>
                           </td>
                         </tr>
                       ))}
@@ -1732,16 +1882,23 @@ export default function App() {
                       {u.photoURL ? <img src={u.photoURL} alt="" className="w-full h-full object-cover" referrerPolicy="no-referrer" /> : u.displayName.charAt(0)}
                     </div>
                     <div className="min-w-0">
-                      <h4 className="font-bold text-slate-800 truncate">{u.displayName}</h4>
-                      <p className="text-[11px] text-slate-500 truncate">{u.email}</p>
-                      <div className="mt-1.5 flex items-center gap-2">
+                      <h4 className="font-bold text-slate-800 truncate leading-tight mb-0.5">{u.displayName}</h4>
+                      <p className="text-[10px] text-slate-500 truncate mb-1">
+                        {u.isManual ? (u.phone || (lang === 'bn' ? 'সরাসরি যুক্ত' : 'Manual Entry')) : u.email}
+                      </p>
+                      <div className="flex items-center gap-2">
                         <span className={cn(
-                          "px-2 py-0.5 rounded text-[9px] font-bold uppercase tracking-tight",
+                          "px-2 py-0.5 rounded text-[8px] font-bold uppercase tracking-tight",
                           u.appRole === 'super_admin' ? "bg-purple-100 text-purple-700" : 
                           u.appRole === 'admin' ? "bg-blue-100 text-blue-700" : "bg-slate-100 text-slate-700"
                         )}>
                           {u.appRole === 'super_admin' ? t.superAdmin : u.appRole === 'admin' ? t.admin : t.member}
                         </span>
+                        {u.isManual && (
+                          <span className="px-2 py-0.5 rounded text-[8px] font-bold uppercase tracking-tight bg-orange-100 text-orange-700">
+                            {t.manualMember}
+                          </span>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -2228,7 +2385,15 @@ export default function App() {
                   const memberCount = showEditGroupModal.members?.length || 1;
                   const newGoalAmount = memberCount * monthlyAmount * durationMonths;
 
-                  await updateDoc(doc(db, 'groups', showEditGroupModal.id), {
+                  const groupRef = doc(db, 'groups', showEditGroupModal.id);
+                  const groupSnap = await getDoc(groupRef);
+                  if (!groupSnap.exists()) {
+                    alert(lang === 'bn' ? 'এই গ্রুপটি আর নেই।' : 'This group no longer exists.');
+                    setShowEditGroupModal(null);
+                    return;
+                  }
+
+                  await updateDoc(groupRef, {
                     name: formData.get('name'),
                     monthlyAmount,
                     durationMonths,
@@ -2337,7 +2502,9 @@ export default function App() {
                     ? (lang === 'bn' ? 'এই গ্রুপটি এবং এর সকল ডাটা চিরতরে মুছে যাবে।' : 'This group and all its data will be permanently deleted.')
                     : confirmDelete.type === 'member'
                       ? (lang === 'bn' ? 'এই সদস্যকে গ্রুপ থেকে রিমুভ করা হবে।' : 'This member will be removed from the group.')
-                      : (lang === 'bn' ? 'এই লেনদেনটি চিরতরে মুছে যাবে।' : 'This transaction will be permanently deleted.')
+                      : confirmDelete.type === 'user'
+                        ? (lang === 'bn' ? `আপনি কি নিশ্চিত যে আপনি "${confirmDelete.displayName}" এর প্রোফাইল ডিলিট করতে চান? এটি তার অ্যাপ এক্সেস বন্ধ করে দেবে।` : `Are you sure you want to delete the profile of "${confirmDelete.displayName}"? This will revoke their app access.`)
+                        : (lang === 'bn' ? 'এই লেনদেনটি চিরতরে মুছে যাবে।' : 'This transaction will be permanently deleted.')
                   }
                 </p>
               </div>
@@ -2353,6 +2520,7 @@ export default function App() {
                     if (confirmDelete.type === 'group') deleteGroup(confirmDelete.id);
                     else if (confirmDelete.type === 'member') deleteMemberFromGroup(confirmDelete.id, confirmDelete.secondaryId!);
                     else if (confirmDelete.type === 'tx') deleteTransaction(confirmDelete.id, confirmDelete.secondaryId!);
+                    else if (confirmDelete.type === 'user') deleteUserByAdmin(confirmDelete.id);
                   }} 
                   className="flex-1 px-6 py-4 text-sm font-bold text-rose-600 hover:bg-rose-50 transition-colors"
                 >
