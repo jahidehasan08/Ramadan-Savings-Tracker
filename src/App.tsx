@@ -445,7 +445,23 @@ export default function App() {
   const [filterYear, setFilterYear] = useState<number>(new Date().getFullYear());
   const [showAllTime, setShowAllTime] = useState(false);
 
-  const months = [
+  // Sync filter with selected group
+  useEffect(() => {
+    if (selectedGroup) {
+      const now = new Date();
+      const start = selectedGroup.startDate?.toDate ? selectedGroup.startDate.toDate() : new Date(selectedGroup.startDate || Date.now());
+      const end = selectedGroup.endDate?.toDate ? selectedGroup.endDate.toDate() : new Date(selectedGroup.endDate || Date.now());
+      
+      let targetDate = now;
+      if (now < start) targetDate = start;
+      if (now > end) targetDate = end;
+
+      setFilterMonth(targetDate.getMonth());
+      setFilterYear(targetDate.getFullYear());
+    }
+  }, [selectedGroup]);
+
+  const months = useMemo(() => [
     { bn: 'জানুয়ারি', en: 'January', value: 0 },
     { bn: 'ফেব্রুয়ারি', en: 'February', value: 1 },
     { bn: 'মার্চ', en: 'March', value: 2 },
@@ -458,9 +474,45 @@ export default function App() {
     { bn: 'অক্টোবর', en: 'October', value: 9 },
     { bn: 'নভেম্বর', en: 'November', value: 10 },
     { bn: 'ডিসেম্বর', en: 'December', value: 11 }
-  ];
+  ], []);
 
-  const years = [2024, 2025, 2026, 2027];
+  const years = useMemo(() => {
+    if (!selectedGroup) return [new Date().getFullYear()];
+    const start = selectedGroup.startDate?.toDate ? selectedGroup.startDate.toDate() : new Date();
+    const end = selectedGroup.endDate?.toDate ? selectedGroup.endDate.toDate() : new Date();
+    const startYear = start.getFullYear();
+    const endYear = end.getFullYear();
+    const list = [];
+    for (let i = startYear; i <= endYear; i++) {
+        list.push(i);
+    }
+    return list.length > 0 ? list : [new Date().getFullYear()];
+  }, [selectedGroup]);
+
+  const groupMonthsByYear = useMemo(() => {
+    if (!selectedGroup) return {};
+    const map: Record<number, number[]> = {};
+    const start = selectedGroup.startDate?.toDate ? selectedGroup.startDate.toDate() : new Date();
+    const end = selectedGroup.endDate?.toDate ? selectedGroup.endDate.toDate() : new Date();
+    
+    let current = new Date(start.getFullYear(), start.getMonth(), 1);
+    while (current <= end) {
+      const y = current.getFullYear();
+      const m = current.getMonth();
+      if (!map[y]) map[y] = [];
+      map[y].push(m);
+      current.setMonth(current.getMonth() + 1);
+    }
+    return map;
+  }, [selectedGroup]);
+
+  const availableMonthsForFilter = useMemo(() => {
+    const yearMonths = groupMonthsByYear[filterYear];
+    if (yearMonths) {
+      return months.filter(m => yearMonths.includes(m.value));
+    }
+    return months;
+  }, [groupMonthsByYear, filterYear]);
 
   const changeUserRole = async (uid: string, newRole: 'admin' | 'member') => {
     if (userProfile?.appRole !== 'super_admin') return;
@@ -507,6 +559,11 @@ export default function App() {
       });
       
       membersSnap.forEach((d) => {
+        const memberData = d.data();
+        // If it's a manual member, cleanup their global user profile too
+        if (memberData.isManual) {
+          batch.delete(doc(db, 'users', d.id));
+        }
         batch.delete(d.ref);
       });
       
@@ -701,13 +758,13 @@ export default function App() {
 
       const detachAllUsers = onSnapshot(q, (snapshot) => {
         const users = snapshot.docs.map(doc => ({ ...doc.data(), uid: doc.id } as UserProfile));
-        // Sort admins up, then by name
+        // Sort admins up, then by name (Bengali alphabetical)
         const sorted = [...users].sort((a, b) => {
           if (a.appRole === 'super_admin') return -1;
           if (b.appRole === 'super_admin') return 1;
           if (a.appRole === 'admin') return -1;
           if (b.appRole === 'admin') return 1;
-          return a.displayName.localeCompare(b.displayName);
+          return a.displayName.localeCompare(b.displayName, 'bn-BD');
         });
         setAllUsers(sorted);
       }, (error) => console.error("All Users Snapshot error:", error));
@@ -846,7 +903,10 @@ export default function App() {
 
       const memberQ = collection(db, 'groups', selectedGroup.id, 'members');
       const detachMem = onSnapshot(memberQ, (snapshot) => {
-        setMembers(snapshot.docs.map(doc => ({ ...doc.data(), uid: doc.id } as GroupMember)));
+        const unsortedMembers = snapshot.docs.map(doc => ({ ...doc.data(), uid: doc.id } as GroupMember));
+        // Sort by name (Bengali alphabetical)
+        const sortedMembers = unsortedMembers.sort((a, b) => a.displayName.localeCompare(b.displayName, 'bn-BD'));
+        setMembers(sortedMembers);
         if (snapshot.metadata.hasPendingWrites) setIsSyncing(true);
       }, (error) => console.error("Group Members Snapshot error:", error));
 
@@ -1355,12 +1415,6 @@ export default function App() {
             <LogOut size={14} />
             {lang === 'bn' ? 'লগআউট করুন' : 'Logout'}
           </button>
-          
-          <div className="pt-6 border-t border-white/10">
-            <p className="text-[10px] text-white/40 leading-relaxed italic">
-              {lang === 'bn' ? 'সাইট তৈরি করেছেন মোঃ জাহিদ হাসান' : 'Site created by Md. Zahid Hasan'}
-            </p>
-          </div>
         </div>
       </aside>
 
@@ -1402,32 +1456,41 @@ export default function App() {
             )}
 
             {activeTab === 'dashboard' && (
-              <div className="flex flex-wrap items-center gap-1 bg-slate-50 p-1 rounded-lg border border-slate-100 max-w-full">
-                <select 
-                  value={filterMonth} 
-                  onChange={(e) => { setFilterMonth(parseInt(e.target.value)); setShowAllTime(false); }}
-                  className="bg-transparent px-0.5 py-0.5 text-[9px] font-bold text-slate-600 outline-none cursor-pointer hover:text-primary transition-colors max-w-[65px]"
-                >
-                  {months.map(m => (
-                    <option key={m.value} value={m.value}>{lang === 'bn' ? m.bn : m.en}</option>
-                  ))}
-                </select>
-                <div className="w-px h-3 bg-slate-200" />
+              <div className="flex flex-wrap items-center justify-center gap-1.5 bg-slate-100/50 p-1.5 rounded-2xl border border-slate-200 max-w-full shadow-sm transition-all hover:shadow-md">
                 <select 
                   value={filterYear} 
-                  onChange={(e) => { setFilterYear(parseInt(e.target.value)); setShowAllTime(false); }}
-                  className="bg-transparent px-0.5 py-0.5 text-[9px] font-bold text-slate-600 outline-none cursor-pointer hover:text-primary transition-colors max-w-[50px]"
+                  onChange={(e) => { 
+                    const y = parseInt(e.target.value);
+                    setFilterYear(y); 
+                    setShowAllTime(false);
+                    // Adjust month if the current month is not in the new year's available months
+                    const availableInNewYear = groupMonthsByYear[y];
+                    if (availableInNewYear && !availableInNewYear.includes(filterMonth)) {
+                      setFilterMonth(availableInNewYear[0]);
+                    }
+                  }}
+                  className="bg-transparent px-2 py-0.5 text-[10px] font-bold text-slate-700 outline-none cursor-pointer hover:text-primary transition-colors min-w-[60px]"
                 >
                   {years.map(y => (
                     <option key={y} value={y}>{formatNumber(y, lang)}</option>
                   ))}
                 </select>
-                <div className="w-px h-3 bg-slate-200" />
+                <div className="w-px h-3.5 bg-slate-200 mx-0.5" />
+                <select 
+                  value={filterMonth} 
+                  onChange={(e) => { setFilterMonth(parseInt(e.target.value)); setShowAllTime(false); }}
+                  className="bg-transparent px-2 py-0.5 text-[10px] font-bold text-slate-700 outline-none cursor-pointer hover:text-primary transition-colors min-w-[75px]"
+                >
+                  {availableMonthsForFilter.map(m => (
+                    <option key={m.value} value={m.value}>{lang === 'bn' ? m.bn : m.en}</option>
+                  ))}
+                </select>
+                <div className="w-px h-3.5 bg-slate-200 mx-0.5" />
                 <button 
                   onClick={() => setShowAllTime(!showAllTime)}
                   className={cn(
-                    "px-1.5 py-0.5 rounded-md text-[8px] uppercase tracking-wider font-bold transition-all",
-                    showAllTime ? "bg-primary text-white" : "text-slate-500 hover:text-primary"
+                    "px-2.5 py-1 rounded-lg text-[9px] uppercase tracking-wider font-extrabold transition-all",
+                    showAllTime ? "bg-primary text-white shadow-sm" : "text-slate-500 hover:text-primary hover:bg-white"
                   )}
                 >
                   {t.allMonths}
@@ -1520,42 +1583,42 @@ export default function App() {
                   {/* Stats Overview */}
                   <div className="space-y-2">
                     <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2 md:gap-3">
-                      <div className="card p-3 md:p-4">
+                      <div className="card p-3 md:p-4 flex flex-col items-center text-center">
                         <div className="text-[9px] md:text-[10px] font-bold text-text-light uppercase tracking-wider mb-1">
                           {lang === 'bn' ? 'মোট জমা' : 'Collected'}
                         </div>
-                        <div className="text-sm font-bold text-emerald-600 truncate">
+                        <div className="text-sm font-bold text-emerald-600 truncate w-full">
                            {formatCurrency(transactions.filter(tx => tx.type === 'deposit').reduce((acc, tx) => acc + tx.amount, 0), lang)}
                         </div>
                       </div>
                       
-                      <div className="card p-3 md:p-4">
+                      <div className="card p-3 md:p-4 flex flex-col items-center text-center">
                         <div className="text-[9px] md:text-[10px] font-bold text-text-light uppercase tracking-wider mb-1">
                           {lang === 'bn' ? 'বাকি' : 'Remaining'}
                         </div>
-                        <div className="text-sm font-bold text-rose-600 truncate">
+                        <div className="text-sm font-bold text-rose-600 truncate w-full">
                            {formatCurrency(Math.max(0, selectedGroup.goalAmount - transactions.filter(tx => tx.type === 'deposit').reduce((acc, tx) => acc + tx.amount, 0)), lang)}
                         </div>
                       </div>
 
-                      <div className="card p-3 md:p-4">
-                        <div className="text-[9px] md:text-[10px] font-bold text-text-light uppercase tracking-wider mb-1 truncate">
+                      <div className="card p-3 md:p-4 flex flex-col items-center text-center">
+                        <div className="text-[9px] md:text-[10px] font-bold text-text-light uppercase tracking-wider mb-1 truncate w-full">
                           {lang === 'bn' ? 'মোট লক্ষ্যমাত্রা' : 'Target Goal'}
                         </div>
-                        <div className="text-sm font-bold text-primary truncate">
+                        <div className="text-sm font-bold text-primary truncate w-full">
                           {formatCurrency(selectedGroup.goalAmount, lang)}
                         </div>
-                        <div className="text-[8px] text-slate-400 font-medium leading-tight whitespace-pre-wrap">
+                        <div className="text-[8px] text-slate-400 font-medium leading-tight whitespace-pre-wrap mt-0.5">
                           {formatNumber(selectedGroup.members.length, lang)} × ({formatCurrency(selectedGroup.monthlyAmount || 0, lang)} × {formatNumber(selectedGroup.durationMonths || 1, lang)}
                           {selectedGroup.previousYearBalancePerPerson ? ` + ${formatCurrency(selectedGroup.previousYearBalancePerPerson, lang)}` : ''})
                         </div>
                       </div>
 
-                      <div className="card p-3 md:p-4">
-                        <div className="text-[9px] md:text-[10px] font-bold text-text-light uppercase tracking-wider mb-1 truncate">
+                      <div className="card p-3 md:p-4 flex flex-col items-center text-center">
+                        <div className="text-[9px] md:text-[10px] font-bold text-text-light uppercase tracking-wider mb-1 truncate w-full">
                           {lang === 'bn' ? 'মোট সদস্য' : 'Total Members'}
                         </div>
-                        <div className="text-sm font-bold text-primary truncate">
+                        <div className="text-sm font-bold text-primary truncate w-full">
                           {formatNumber(members.filter(m => {
                             const joinedAt = m.joinedAt && m.joinedAt.toDate ? m.joinedAt.toDate() : new Date(m.joinedAt || 0);
                             const startDate = selectedGroup.startDate && selectedGroup.startDate.toDate ? selectedGroup.startDate.toDate() : new Date(selectedGroup.startDate);
@@ -1565,21 +1628,18 @@ export default function App() {
                         </div>
                       </div>
 
-                      <div className="card p-3 md:p-4">
-                        <div className="text-[9px] md:text-[10px] font-bold text-text-light uppercase tracking-wider mb-1 truncate">
+                      <div className="card p-3 md:p-4 flex flex-col items-center text-center">
+                        <div className="text-[9px] md:text-[10px] font-bold text-text-light uppercase tracking-wider mb-1 truncate w-full">
                            {showAllTime ? t.allTimeTotal : `${months.find(m => m.value === filterMonth)?.[lang]} ${formatNumber(filterYear, lang)}`}
                         </div>
-                        <div className="text-sm font-bold text-primary truncate">
+                        <div className="text-sm font-bold text-primary truncate w-full">
                           {formatCurrency(totalSavedFiltered, lang)}
-                        </div>
-                        <div className="text-[8px] text-text-light font-bold mt-1 uppercase">
-                          {lang === 'bn' ? 'টার্গেট: ' : 'Goal: '} {formatCurrency(selectedGroup.goalAmount, lang)}
                         </div>
                       </div>
                       
-                      <div className="card p-3 md:p-4">
+                      <div className="card p-3 md:p-4 flex flex-col items-center text-center">
                         <div className="text-[9px] md:text-[10px] font-bold text-text-light uppercase tracking-wider mb-1">{lang === 'bn' ? 'টার্গেট ফিলাপ' : 'Target'}</div>
-                        <div className="text-xs font-bold text-primary truncate mt-1">
+                        <div className="text-sm font-black text-primary truncate mt-1">
                           {formatNumber(Math.round((transactions.filter(tx => {
                              const txDate = tx.date && tx.date.toDate ? tx.date.toDate() : new Date(tx.date);
                              const startDate = selectedGroup.startDate && selectedGroup.startDate.toDate ? selectedGroup.startDate.toDate() : new Date(selectedGroup.startDate);
@@ -1587,9 +1647,9 @@ export default function App() {
                              return tx.type === 'deposit' && txDate >= startDate && txDate <= endDate;
                            }).reduce((acc, tx) => acc + tx.amount, 0) / selectedGroup.goalAmount) * 100), lang)}%
                         </div>
-                        <div className="h-1 bg-slate-100 rounded-full mt-2 overflow-hidden">
+                        <div className="h-2.5 bg-slate-200 rounded-full mt-2.5 overflow-hidden w-full max-w-[120px] shadow-inner">
                           <div 
-                            className="bg-primary h-full transition-all duration-500" 
+                            className="bg-primary h-full transition-all duration-500 rounded-full shadow-sm" 
                             style={{ width: `${Math.min(100, (transactions.filter(tx => {
                                const txDate = tx.date && tx.date.toDate ? tx.date.toDate() : new Date(tx.date);
                                const startDate = selectedGroup.startDate && selectedGroup.startDate.toDate ? selectedGroup.startDate.toDate() : new Date(selectedGroup.startDate);
@@ -1624,10 +1684,10 @@ export default function App() {
                           <table className="w-full border-collapse">
                             <thead>
                               <tr>
-                                <th className="data-table-th">{lang === 'bn' ? 'তারিখ' : 'Date'}</th>
-                                <th className="data-table-th">{lang === 'bn' ? 'সদস্যের নাম' : 'Member Name'}</th>
-                                <th className="data-table-th">{t.description}</th>
-                                <th className="data-table-th">{lang === 'bn' ? 'পরিমাণ' : 'Amount'}</th>
+                                <th className="data-table-th text-left">{lang === 'bn' ? 'তারিখ' : 'Date'}</th>
+                                <th className="data-table-th text-left">{lang === 'bn' ? 'সদস্যের নাম' : 'Member Name'}</th>
+                                <th className="data-table-th text-left">{t.description}</th>
+                                <th className="data-table-th text-right">{lang === 'bn' ? 'পরিমাণ' : 'Amount'}</th>
                                 <th className="data-table-th text-center">{t.action}</th>
                               </tr>
                             </thead>
@@ -1639,25 +1699,27 @@ export default function App() {
                               ) : (
                                 filteredTransactions.map(tx => (
                                   <tr key={tx.id} className="hover:bg-slate-50 transition-colors group">
-                                    <td className="data-table-td text-[11px] text-text-light font-medium">
+                                    <td className="data-table-td text-[11px] text-text-light font-medium text-left">
                                       {tx.date && (tx.date.toDate ? tx.date.toDate() : new Date(tx.date)).toLocaleDateString(lang === 'bn' ? 'bn-BD' : 'en-US', { day: 'numeric', month: 'short', year: 'numeric' })}
                                     </td>
-                                    <td className="data-table-td font-semibold">
-                                      {tx.userName}
-                                      {tx.forMonths && tx.forMonths.length > 0 && (
-                                        <div className="flex flex-wrap gap-1 mt-1">
-                                          {tx.forMonths.map(m => (
-                                            <span key={m} className="px-1.5 py-0.5 bg-primary/10 text-primary text-[8px] font-bold rounded uppercase">
-                                              {m}
-                                            </span>
-                                          ))}
-                                        </div>
-                                      )}
+                                    <td className="data-table-td font-semibold text-left">
+                                      <div className="flex flex-col">
+                                        <span className="text-sm font-bold text-slate-800">{tx.userName}</span>
+                                        {tx.forMonths && tx.forMonths.length > 0 && (
+                                          <div className="flex flex-wrap gap-1 mt-1">
+                                            {tx.forMonths.map(m => (
+                                              <span key={m} className="px-1.5 py-0.5 bg-primary/10 text-primary text-[8px] font-extrabold rounded-md uppercase tracking-tight">
+                                                {m}
+                                              </span>
+                                            ))}
+                                          </div>
+                                        )}
+                                      </div>
                                     </td>
-                                    <td className="data-table-td text-text-light truncate max-w-[120px]">{tx.description}</td>
+                                    <td className="data-table-td text-text-light truncate max-w-[120px] text-left text-[11px] italic">{tx.description || '-'}</td>
                                     <td className={cn(
-                                      "data-table-td font-bold",
-                                      tx.type === 'deposit' ? "text-primary" : "text-red-700"
+                                      "data-table-td font-bold text-right",
+                                      tx.type === 'deposit' ? "text-emerald-600" : "text-rose-600"
                                     )}>
                                       {tx.type === 'deposit' ? '+' : '-'}{formatNumber(tx.amount, lang)} ৳
                                     </td>
